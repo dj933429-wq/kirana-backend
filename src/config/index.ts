@@ -25,7 +25,7 @@ const configSchema = z
   .object({
     PORT: z.coerce.number().int().positive().default(3000),
     DATABASE_URL: z.string().url('DATABASE_URL must be a valid PostgreSQL connection URL'),
-    DATABASE_POOL_SIZE: z.coerce.number().int().min(1).max(100).default(10),
+    DATABASE_POOL_SIZE: z.coerce.number().int().min(1).max(100).default(5),
     DATABASE_SSL: z.preprocess(
       (val) => (typeof val === 'string' ? val.toLowerCase() === 'true' || val === '1' : Boolean(val)),
       z.boolean(),
