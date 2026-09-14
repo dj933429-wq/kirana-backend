@@ -1,10 +1,14 @@
 import fs from 'fs';
 import path from 'path';
+import dns from 'dns';
 import { PrismaClient } from '../generated/prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import pg from 'pg';
 import { config } from './index';
 import { logger } from '../utils/logger';
+
+// Enforce IPv4-first DNS resolution order for reliable cloud egress networking
+dns.setDefaultResultOrder('ipv4first');
 
 // Sanitize connectionString so SSL query parameters (e.g. sslmode=require)
 // do not cause pg's ConnectionParameters to overwrite our explicit SSL configuration
