@@ -11,10 +11,17 @@ const poolConfig: pg.PoolConfig = {
   max: config.DATABASE_POOL_SIZE,
 };
 
-if (config.DATABASE_SSL) {
-  const caCertPath = path.resolve(process.cwd(), 'certs/supabase-root.crt');
-  const ca = fs.existsSync(caCertPath) ? fs.readFileSync(caCertPath, 'utf8') : undefined;
+const caCertPath = path.resolve(__dirname, '../../certs/supabase-root.crt');
 
+if (config.DATABASE_SSL && !fs.existsSync(caCertPath)) {
+  throw new Error(
+    `FATAL: Supabase CA cert not found at ${caCertPath}. Refusing to start with insecure TLS fallback.`,
+  );
+}
+
+const ca = config.DATABASE_SSL ? fs.readFileSync(caCertPath, 'utf8') : undefined;
+
+if (config.DATABASE_SSL) {
   poolConfig.ssl = {
     rejectUnauthorized: config.DATABASE_SSL_REJECT_UNAUTHORIZED,
     ...(ca ? { ca } : {}),
@@ -22,6 +29,10 @@ if (config.DATABASE_SSL) {
 }
 
 const pool = new pg.Pool(poolConfig);
+
+logger.info(
+  `DB SSL config: DATABASE_SSL=${config.DATABASE_SSL}, caCertPath=${caCertPath}, caLoaded=${!!ca}, caLength=${ca?.length ?? 0}, rejectUnauthorized=${config.DATABASE_SSL_REJECT_UNAUTHORIZED}`,
+);
 
 pool.on('error', (err) => {
   logger.error(`Unexpected database pool error: ${err.message}\nStack: ${err.stack}`);
