@@ -41,8 +41,25 @@ export const errorHandler = (
     });
   }
 
+  // Handle malformed JSON body errors from express.json()
+  if (err instanceof SyntaxError && 'status' in err && (err as { status: number }).status === 400 && 'body' in err) {
+    logger.warn(`Malformed JSON payload in request: ${err.message}`);
+    return res.status(400).json({
+      status: 'error',
+      message: 'Malformed JSON payload in request body',
+    });
+  }
+
   // Unhandled/Programming error: log stack trace and send generic response
-  logger.error(`Unhandled error: ${err.message}\nStack: ${err.stack}`);
+  const fullError = {
+    name: err.name,
+    code: (err as { code?: string }).code,
+    message: err.message,
+    meta: (err as { meta?: unknown }).meta,
+    clientVersion: (err as { clientVersion?: string }).clientVersion,
+    stack: err.stack,
+  };
+  logger.error(`Unhandled error:\n${JSON.stringify(fullError, null, 2)}`);
   return res.status(500).json({
     status: 'error',
     message: 'Something went wrong on the server',

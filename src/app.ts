@@ -12,6 +12,9 @@ import authRoutes from './routes/auth.routes';
 
 const app = express();
 
+// Trust reverse proxy (e.g. Render, Cloudflare) for accurate client IP in rate limiting & headers
+app.set('trust proxy', 1);
+
 // Security & Performance Middleware
 app.use(helmet());
 app.use(compression());
