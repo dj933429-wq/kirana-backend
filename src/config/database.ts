@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import { PrismaClient } from '../generated/prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import pg from 'pg';
@@ -10,8 +12,12 @@ const poolConfig: pg.PoolConfig = {
 };
 
 if (config.DATABASE_SSL) {
+  const caCertPath = path.resolve(process.cwd(), 'certs/supabase-root.crt');
+  const ca = fs.existsSync(caCertPath) ? fs.readFileSync(caCertPath, 'utf8') : undefined;
+
   poolConfig.ssl = {
     rejectUnauthorized: config.DATABASE_SSL_REJECT_UNAUTHORIZED,
+    ...(ca ? { ca } : {}),
   };
 }
 
