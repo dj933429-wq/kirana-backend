@@ -6,7 +6,7 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 
 # Install build dependencies
-COPY package*.json tsconfig.json ./
+COPY package*.json tsconfig.json prisma.config.ts* ./
 COPY prisma/ ./prisma/
 
 RUN npm ci
@@ -14,8 +14,12 @@ RUN npm ci
 # Copy source files
 COPY src/ ./src/
 
+# Generate Prisma Client to src/generated/prisma before TypeScript compilation
+RUN DIRECT_URL="postgresql://placeholder:placeholder@localhost:5432/placeholder" npx prisma generate
+
 # Compile TypeScript to dist/
 RUN npm run build
+
 
 # Remove development dependencies to keep production footprint minimal
 RUN npm prune --omit=dev
