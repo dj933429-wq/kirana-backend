@@ -6,8 +6,28 @@ import pg from 'pg';
 import { config } from './index';
 import { logger } from '../utils/logger';
 
+// Sanitize connectionString so SSL query parameters (e.g. sslmode=require)
+// do not cause pg's ConnectionParameters to overwrite our explicit SSL configuration
+let connectionString = config.DATABASE_URL;
+try {
+  const parsedUrl = new URL(connectionString);
+  const sslParams = ['sslmode', 'ssl', 'sslrootcert', 'sslcert', 'sslkey'];
+  let modified = false;
+  for (const param of sslParams) {
+    if (parsedUrl.searchParams.has(param)) {
+      parsedUrl.searchParams.delete(param);
+      modified = true;
+    }
+  }
+  if (modified) {
+    connectionString = parsedUrl.toString();
+  }
+} catch {
+  // If not a standard URL, keep original connectionString
+}
+
 const poolConfig: pg.PoolConfig = {
-  connectionString: config.DATABASE_URL,
+  connectionString,
   max: config.DATABASE_POOL_SIZE,
 };
 
