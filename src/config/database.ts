@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import dns from 'dns';
+import net from 'net';
 import { PrismaClient } from '../generated/prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import pg from 'pg';
@@ -33,6 +34,23 @@ try {
 const poolConfig: pg.PoolConfig = {
   connectionString,
   max: config.DATABASE_POOL_SIZE,
+  stream: () => {
+    const socket = new net.Socket();
+    const origConnect = socket.connect.bind(socket);
+    socket.connect = function (this: net.Socket, ...args: unknown[]) {
+      if (typeof args[0] === 'number') {
+        return origConnect(
+          { port: args[0], host: args[1] as string, family: 4 },
+          args[2] as () => void,
+        );
+      }
+      if (typeof args[0] === 'object' && args[0] !== null) {
+        (args[0] as { family?: number }).family = 4;
+      }
+      return origConnect.apply(this, args as Parameters<typeof origConnect>);
+    };
+    return socket;
+  },
 };
 
 const caCertPath = path.resolve(__dirname, '../../certs/supabase-root.crt');
