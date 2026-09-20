@@ -27,7 +27,9 @@ export const authMiddleware = async (
 
     let decoded: JwtPayload;
     try {
-      decoded = jwt.verify(token, config.JWT_SECRET) as JwtPayload;
+      decoded = jwt.verify(token, config.JWT_SECRET, {
+        algorithms: ['HS256'],
+      }) as JwtPayload;
     } catch {
       throw new AppError('Unauthorized: Invalid or expired token', 401);
     }

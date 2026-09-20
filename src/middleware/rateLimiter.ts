@@ -20,3 +20,44 @@ export const loginRateLimiter = rateLimit({
     });
   },
 });
+
+/**
+ * General API rate limiter middleware for /api/v1 routes.
+ * Protects against Denial-of-Service (DoS), resource exhaustion, and high-volume API abuse.
+ */
+export const generalApiRateLimiter = rateLimit({
+  windowMs: config.RATE_LIMIT_WINDOW_MS,
+  limit: config.RATE_LIMIT_MAX_GENERAL_REQUESTS,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => config.NODE_ENV === 'test',
+  handler: (_req: Request, res: Response) => {
+    res.status(429).json({
+      status: 'error',
+      message: 'Too many requests from this IP. Please try again later.',
+    });
+  },
+});
+
+/**
+ * Factory for creating isolated rate limiter instances (e.g. for dedicated tests).
+ */
+export const createCustomRateLimiter = (options: {
+  windowMs: number;
+  limit: number;
+  message: string;
+  skip?: () => boolean;
+}) =>
+  rateLimit({
+    windowMs: options.windowMs,
+    limit: options.limit,
+    standardHeaders: true,
+    legacyHeaders: false,
+    skip: options.skip || (() => false),
+    handler: (_req: Request, res: Response) => {
+      res.status(429).json({
+        status: 'error',
+        message: options.message,
+      });
+    },
+  });

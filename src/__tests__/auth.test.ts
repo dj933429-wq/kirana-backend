@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import request from 'supertest';
 import app from '../app';
 import { prisma, disconnectDb } from '../config/database';
@@ -126,6 +127,103 @@ describe('Auth Module Integration Tests', () => {
         .set('Authorization', `Bearer ${tempToken}`);
       expect(response.status).toBe(401);
       expect(response.body.message).toContain('User no longer exists');
+    });
+  });
+
+  describe('JWT Algorithm Restriction & Enforcement', () => {
+    it('should accept a legitimate token signed with HS256', async () => {
+      const validToken = jwt.sign({ id: merchant.id, email: merchant.email }, config.JWT_SECRET, {
+        algorithm: 'HS256',
+        expiresIn: '1h',
+      });
+      const response = await request(app)
+        .get('/api/v1/customers')
+        .set('Authorization', `Bearer ${validToken}`);
+      expect(response.status).toBe(200);
+      expect(response.body.status).toBe('success');
+    });
+
+    it('should reject a token signed with an unsupported asymmetric algorithm (RS256)', async () => {
+      // Dynamically generate an in-memory ephemeral RSA keypair (never stored in repo)
+      const { privateKey } = crypto.generateKeyPairSync('rsa', {
+        modulusLength: 2048,
+        publicKeyEncoding: { type: 'spki', format: 'pem' },
+        privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+      });
+
+      const rs256Token = jwt.sign({ id: merchant.id, email: merchant.email }, privateKey, {
+        algorithm: 'RS256',
+        expiresIn: '1h',
+      });
+
+      const response = await request(app)
+        .get('/api/v1/customers')
+        .set('Authorization', `Bearer ${rs256Token}`);
+
+      expect(response.status).toBe(401);
+      expect(response.body.status).toBe('error');
+      expect(response.body.message).toContain('Invalid or expired token');
+    });
+
+    it('should reject an unsigned token using the "none" algorithm', async () => {
+      const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url');
+      const payload = Buffer.from(
+        JSON.stringify({
+          id: merchant.id,
+          email: merchant.email,
+          exp: Math.floor(Date.now() / 1000) + 3600,
+        }),
+      ).toString('base64url');
+      const noneToken = `${header}.${payload}.`;
+
+      const response = await request(app)
+        .get('/api/v1/customers')
+        .set('Authorization', `Bearer ${noneToken}`);
+
+      expect(response.status).toBe(401);
+      expect(response.body.status).toBe('error');
+      expect(response.body.message).toContain('Invalid or expired token');
+    });
+
+    it('should reject a token signed with the wrong secret', async () => {
+      const wrongSecretToken = jwt.sign(
+        { id: merchant.id, email: merchant.email },
+        'different-unauthorized-secret-key-32chars',
+        { algorithm: 'HS256', expiresIn: '1h' },
+      );
+
+      const response = await request(app)
+        .get('/api/v1/customers')
+        .set('Authorization', `Bearer ${wrongSecretToken}`);
+
+      expect(response.status).toBe(401);
+      expect(response.body.status).toBe('error');
+      expect(response.body.message).toContain('Invalid or expired token');
+    });
+
+    it('should reject a completely malformed token string', async () => {
+      const response = await request(app)
+        .get('/api/v1/customers')
+        .set('Authorization', 'Bearer not.a.valid.jwt.token');
+
+      expect(response.status).toBe(401);
+      expect(response.body.status).toBe('error');
+      expect(response.body.message).toContain('Invalid or expired token');
+    });
+
+    it('should reject an expired HS256 token', async () => {
+      const expiredToken = jwt.sign({ id: merchant.id, email: merchant.email }, config.JWT_SECRET, {
+        algorithm: 'HS256',
+        expiresIn: '-1h',
+      });
+
+      const response = await request(app)
+        .get('/api/v1/customers')
+        .set('Authorization', `Bearer ${expiredToken}`);
+
+      expect(response.status).toBe(401);
+      expect(response.body.status).toBe('error');
+      expect(response.body.message).toContain('Invalid or expired token');
     });
   });
 });

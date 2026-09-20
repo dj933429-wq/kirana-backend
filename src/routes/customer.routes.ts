@@ -5,11 +5,14 @@ import { LedgerController } from '../controllers/ledger.controller';
 import {
   validateBody,
   validateQuery,
+  validateParams,
   createCustomerSchema,
   updateCustomerSchema,
   paginationAndSortSchema,
   searchCustomersSchema,
   ledgerQuerySchema,
+  uuidParamSchema,
+  customerIdParamSchema,
 } from '../middleware/validation.middleware';
 import { validateListTransactions } from '../middleware/transactionValidation.middleware';
 import { authMiddleware } from '../middleware/auth.middleware';
@@ -30,13 +33,18 @@ router.get('/search', validateQuery(searchCustomersSchema), controller.searchCus
 router.get('/', validateQuery(paginationAndSortSchema), controller.getAllCustomers);
 
 // Get customer by ID
-router.get('/:id', controller.getCustomer);
+router.get('/:id', validateParams(uuidParamSchema), controller.getCustomer);
 
 // Update customer
-router.patch('/:id', validateBody(updateCustomerSchema), controller.updateCustomer);
+router.patch(
+  '/:id',
+  validateParams(uuidParamSchema),
+  validateBody(updateCustomerSchema),
+  controller.updateCustomer,
+);
 
 // Soft delete customer
-router.delete('/:id', controller.deleteCustomer);
+router.delete('/:id', validateParams(uuidParamSchema), controller.deleteCustomer);
 
 const transactionController = new TransactionController();
 const ledgerController = new LedgerController();
@@ -44,6 +52,7 @@ const ledgerController = new LedgerController();
 // Get customer transactions
 router.get(
   '/:customerId/transactions',
+  validateParams(customerIdParamSchema),
   validateListTransactions,
   transactionController.getCustomerTransactions,
 );
@@ -51,6 +60,7 @@ router.get(
 // Get customer ledger with dynamic interest
 router.get(
   '/:customerId/ledger',
+  validateParams(customerIdParamSchema),
   validateQuery(ledgerQuerySchema),
   ledgerController.getCustomerLedger,
 );

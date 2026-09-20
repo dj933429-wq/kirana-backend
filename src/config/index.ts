@@ -54,6 +54,7 @@ const configSchema = z
       .positive()
       .default(15 * 60 * 1000), // 15 minutes
     RATE_LIMIT_MAX_LOGIN_ATTEMPTS: z.coerce.number().int().positive().default(10),
+    RATE_LIMIT_MAX_GENERAL_REQUESTS: z.coerce.number().int().positive().default(100),
   })
   .refine(
     (data) => {

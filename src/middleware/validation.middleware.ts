@@ -194,3 +194,32 @@ export const ledgerQuerySchema = z.object({
     })
     .optional(),
 });
+
+/**
+ * Route parameter schemas for UUID validation
+ * Accepts standard 32-hex 8-4-4-4-12 UUID strings compatible with PostgreSQL uuid type.
+ */
+const UUID_REGEX = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+export const uuidParamSchema = z.object({
+  id: z.string().regex(UUID_REGEX, 'Invalid UUID format'),
+});
+
+export const customerIdParamSchema = z.object({
+  customerId: z.string().regex(UUID_REGEX, 'Invalid customer ID format'),
+});
+
+/**
+ * Reusable params validation middleware
+ */
+export const validateParams = (schema: Schema) => {
+  return async (req: Request, _res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const parsed = await schema.parseAsync(req.params);
+      Object.assign(req.params, parsed);
+      next();
+    } catch (err) {
+      next(err);
+    }
+  };
+};

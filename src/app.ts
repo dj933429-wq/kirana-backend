@@ -9,6 +9,7 @@ import { config } from './config';
 import customerRoutes from './routes/customer.routes';
 import transactionRoutes from './routes/transaction.routes';
 import authRoutes from './routes/auth.routes';
+import { generalApiRateLimiter } from './middleware/rateLimiter';
 
 const app = express();
 
@@ -59,6 +60,9 @@ app.get('/health', (_req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+// General API rate limiter for /api/v1 routes
+app.use('/api/v1', generalApiRateLimiter);
 
 // API routes
 app.use('/api/v1/auth', authRoutes);
