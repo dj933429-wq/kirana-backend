@@ -21,9 +21,7 @@ describe('Production Hardening & Security Unit Tests', () => {
       );
       app.get('/test', (_req, res) => res.json({ success: true }));
 
-      const res = await request(app)
-        .get('/test')
-        .set('Origin', 'https://app.kiranaledger.com');
+      const res = await request(app).get('/test').set('Origin', 'https://app.kiranaledger.com');
 
       expect(res.status).toBe(200);
       expect(res.headers['access-control-allow-origin']).toBe('https://app.kiranaledger.com');
@@ -45,9 +43,7 @@ describe('Production Hardening & Security Unit Tests', () => {
       );
       app.get('/test', (_req, res) => res.json({ success: true }));
 
-      const res = await request(app)
-        .get('/test')
-        .set('Origin', 'https://malicious-site.com');
+      const res = await request(app).get('/test').set('Origin', 'https://malicious-site.com');
 
       expect(res.status).toBe(500); // Express CORS error
     });

@@ -1,7 +1,12 @@
 import request from 'supertest';
 import app from '../app';
 import { prisma, disconnectDb } from '../config/database';
-import { CompoundingFrequency, InterestType, Transaction, TransactionType } from '../generated/prisma/client';
+import {
+  CompoundingFrequency,
+  InterestType,
+  Transaction,
+  TransactionType,
+} from '../generated/prisma/client';
 import jwt from 'jsonwebtoken';
 import { config } from '../config';
 
@@ -707,7 +712,9 @@ describe('Transaction Module Integration Tests', () => {
         });
 
       expect(response.status).toBe(400);
-      expect(response.body.errors[0].message).toContain('Target entry ID is only allowed for CREDIT');
+      expect(response.body.errors[0].message).toContain(
+        'Target entry ID is only allowed for CREDIT',
+      );
     });
 
     it('should reject CREDIT with malformed targetEntryId format (400)', async () => {
@@ -745,7 +752,7 @@ describe('Transaction Module Integration Tests', () => {
       expect(response.body.message).toContain('Target debit transaction not found');
     });
 
-    it('should reject CREDIT targeting another merchant\'s transaction with 404 (multi-tenant security)', async () => {
+    it("should reject CREDIT targeting another merchant's transaction with 404 (multi-tenant security)", async () => {
       // Merchant A attempts to target Merchant B's debit
       const response = await request(app)
         .post('/api/v1/transactions')

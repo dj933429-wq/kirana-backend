@@ -1,13 +1,7 @@
 export type InterestType = 'NO_INTEREST' | 'SIMPLE' | 'COMPOUND';
 
 export type CompoundingFrequency =
-  | 'DAILY'
-  | 'WEEKLY'
-  | 'MONTHLY'
-  | 'QUARTERLY'
-  | 'HALF_YEARLY'
-  | 'YEARLY'
-  | 'CUSTOM';
+  'DAILY' | 'WEEKLY' | 'MONTHLY' | 'QUARTERLY' | 'HALF_YEARLY' | 'YEARLY' | 'CUSTOM';
 
 export interface InterestCalculatorInput {
   principal: number;

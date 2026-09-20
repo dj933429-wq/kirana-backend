@@ -61,7 +61,7 @@ export class TransactionService {
     merchantId: string,
     data: CreateTransactionInput,
   ): Promise<Transaction> {
-    // 1. Validate targetEntryId if specified for CREDIT
+    // 1. Validate targetEntryId if specified for CREDIT (basic FK check)
     if (data.type === TransactionType.CREDIT && data.targetEntryId) {
       const target = await prisma.transaction.findFirst({
         where: {
@@ -89,18 +89,7 @@ export class TransactionService {
         throw new AppError('Cannot target a voided transaction.', 400);
       }
 
-      // Check if target is already fully settled at payment date
-      const ledgerState = await this.ledgerService.generateLedger(
-        merchantId,
-        data.customerId,
-        data.date,
-      );
-      const targetEntry = ledgerState.entries.find((e) => e.entryId === data.targetEntryId);
-      if (
-        targetEntry &&
-        targetEntry.remainingPrincipal <= 0 &&
-        targetEntry.remainingInterest <= 0
-      ) {
+      if (target.isSettled) {
         throw new AppError('Target debit transaction is already fully settled.', 400);
       }
     }
@@ -123,7 +112,7 @@ export class TransactionService {
       const isDebit = data.type === TransactionType.DEBIT;
 
       // 3. Create the transaction record
-      return tx.transaction.create({
+      const newTransaction = await tx.transaction.create({
         data: {
           customerId: data.customerId,
           type: data.type,
@@ -143,6 +132,11 @@ export class TransactionService {
           isVoided: false,
         },
       });
+
+      // 4. Reconcile the customer ledger (full recomputation)
+      await this.ledgerService.reconcileCustomerLedger(data.customerId, tx);
+
+      return newTransaction;
     });
   }
 
@@ -182,6 +176,13 @@ export class TransactionService {
       customCompoundDays: transaction.customCompoundDays,
       dueDate: transaction.dueDate,
       targetEntryId: transaction.targetEntryId,
+      outstandingPrincipal: transaction.outstandingPrincipal,
+      isSettled: transaction.isSettled,
+      settledAt: transaction.settledAt,
+      settledByPaymentId: transaction.settledByPaymentId,
+      interestCharged: transaction.interestCharged,
+      isSystemGenerated: transaction.isSystemGenerated,
+      createdByPaymentId: transaction.createdByPaymentId,
       remarks: transaction.remarks,
       isVoided: transaction.isVoided,
       createdAt: transaction.createdAt,
@@ -314,6 +315,9 @@ export class TransactionService {
         isVoided: true,
       },
     });
+
+    // 4. Reconcile the customer ledger (full recomputation)
+    await this.ledgerService.reconcileCustomerLedger(transaction.customerId);
 
     return updated;
   }

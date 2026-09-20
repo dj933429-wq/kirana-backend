@@ -30,11 +30,14 @@ model Customer {
   defaultInterestType  InterestType         @default(SIMPLE) @map("default_interest_type")
   compoundingFrequency CompoundingFrequency @default(MONTHLY) @map("compounding_frequency")
   customCompoundDays   Int?                 @map("custom_compound_days")
+  interestRate         Decimal              @default(0) @map("interest_rate") @db.Decimal(5, 2)
+  advanceBalance       Decimal              @default(0) @map("advance_balance") @db.Decimal(12, 2)
   isActive             Boolean              @default(true) @map("is_active")
   createdAt            DateTime             @default(now()) @map("created_at")
   updatedAt            DateTime             @updatedAt @map("updated_at")
-  user                 User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user                 User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
   transactions         Transaction[]
+  interestRates        CustomerInterestRate[]
 
   @@index([userId])
   @@index([phoneNumber])
@@ -56,15 +59,29 @@ model Transaction {
   remarks              String?               @map("remarks")
   isVoided             Boolean               @default(false) @map("is_voided")
   targetEntryId        String?               @map("target_entry_id")
+  outstandingPrincipal Decimal?              @map("outstanding_principal") @db.Decimal(12, 2)
+  isSettled            Boolean               @default(false) @map("is_settled")
+  settledAt            DateTime?             @map("settled_at")
+  settledByPaymentId   String?               @map("settled_by_payment_id")
+  interestCharged      Decimal?              @map("interest_charged") @db.Decimal(12, 2)
+  isSystemGenerated    Boolean               @default(false) @map("is_system_generated")
+  createdByPaymentId   String?               @map("created_by_payment_id")
   createdAt            DateTime              @default(now()) @map("created_at")
   updatedAt            DateTime              @updatedAt @map("updated_at")
   customer             Customer              @relation(fields: [customerId], references: [id], onDelete: Cascade)
   targetEntry          Transaction?          @relation("TargetedPayments", fields: [targetEntryId], references: [id], onDelete: SetNull)
   targetedPayments     Transaction[]         @relation("TargetedPayments")
+  settledByPayment     Transaction?          @relation("SettledByPayment", fields: [settledByPaymentId], references: [id], onDelete: SetNull)
+  entriesSettled       Transaction[]         @relation("SettledByPayment")
+  createdByPayment     Transaction?          @relation("CreatedByPayment", fields: [createdByPaymentId], references: [id], onDelete: SetNull)
+  entriesCreated       Transaction[]         @relation("CreatedByPayment")
 
   @@index([customerId])
   @@index([interestStartDate])
   @@index([targetEntryId])
+  @@index([isSettled])
+  @@index([settledByPaymentId])
+  @@index([createdByPaymentId])
   @@map("transactions")
 }
 
@@ -87,5 +104,18 @@ enum CompoundingFrequency {
 enum TransactionType {
   DEBIT
   CREDIT
+}
+
+model CustomerInterestRate {
+  id            String   @id @default(uuid())
+  customerId    String   @map("customer_id")
+  interestRate  Decimal  @map("interest_rate") @db.Decimal(5, 2)
+  effectiveDate DateTime @map("effective_date")
+  createdAt     DateTime @default(now()) @map("created_at")
+  customer      Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+  @@index([effectiveDate])
+  @@map("customer_interest_rates")
 }
 

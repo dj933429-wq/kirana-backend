@@ -1,6 +1,7 @@
 import { prisma } from '../config/database';
 import { CompoundingFrequency, Customer } from '../generated/prisma/client';
 import { AppError } from '../middleware/errorHandler';
+import { LedgerService } from './ledger.service';
 
 export interface CreateCustomerInput {
   name: string;
@@ -8,6 +9,7 @@ export interface CreateCustomerInput {
   lendingRate: number;
   depositRate: number;
   compoundingFrequency: CompoundingFrequency;
+  interestRate?: number;
 }
 
 export interface UpdateCustomerInput {
@@ -16,6 +18,8 @@ export interface UpdateCustomerInput {
   lendingRate?: number;
   depositRate?: number;
   compoundingFrequency?: CompoundingFrequency;
+  interestRate?: number;
+  effectiveDate?: Date | string;
 }
 
 export interface PaginationParams {
@@ -54,7 +58,7 @@ export class CustomerService {
       throw new AppError('Customer with this phone number already exists for this merchant.', 400);
     }
 
-    return prisma.customer.create({
+    const customer = await prisma.customer.create({
       data: {
         userId,
         name: data.name,
@@ -62,9 +66,21 @@ export class CustomerService {
         lendingRate: data.lendingRate,
         depositRate: data.depositRate,
         compoundingFrequency: data.compoundingFrequency,
+        interestRate: data.interestRate ?? 0,
         isActive: true,
       },
     });
+
+    // Record initial interest rate history
+    await prisma.customerInterestRate.create({
+      data: {
+        customerId: customer.id,
+        interestRate: data.interestRate ?? 0,
+        effectiveDate: customer.createdAt,
+      },
+    });
+
+    return customer;
   }
 
   /**
@@ -219,7 +235,23 @@ export class CustomerService {
       }
     }
 
-    return prisma.customer.update({
+    // If interest rate is provided and differs from customer.interestRate
+    const isRateChanged =
+      data.interestRate !== undefined &&
+      Number(data.interestRate) !== Number(customer.interestRate);
+
+    if (isRateChanged) {
+      const parsedEffective = data.effectiveDate ? new Date(data.effectiveDate) : new Date();
+      await prisma.customerInterestRate.create({
+        data: {
+          customerId: id,
+          interestRate: data.interestRate!,
+          effectiveDate: parsedEffective,
+        },
+      });
+    }
+
+    const updated = await prisma.customer.update({
       where: { id },
       data: {
         name: data.name,
@@ -227,8 +259,16 @@ export class CustomerService {
         lendingRate: data.lendingRate,
         depositRate: data.depositRate,
         compoundingFrequency: data.compoundingFrequency,
+        interestRate: data.interestRate,
       },
     });
+
+    if (isRateChanged) {
+      const ledgerService = new LedgerService();
+      await ledgerService.reconcileCustomerLedger(id);
+    }
+
+    return updated;
   }
 
   /**

@@ -42,7 +42,12 @@ export const errorHandler = (
   }
 
   // Handle malformed JSON body errors from express.json()
-  if (err instanceof SyntaxError && 'status' in err && (err as { status: number }).status === 400 && 'body' in err) {
+  if (
+    err instanceof SyntaxError &&
+    'status' in err &&
+    (err as { status: number }).status === 400 &&
+    'body' in err
+  ) {
     logger.warn(`Malformed JSON payload in request: ${err.message}`);
     return res.status(400).json({
       status: 'error',

@@ -1,63 +1,59 @@
 import { prisma } from '../config/database';
-import { InterestService } from './interest.service';
 import { AppError } from '../middleware/errorHandler';
+import { Customer, Transaction, TransactionType } from '../generated/prisma/client';
+import { Decimal } from 'decimal.js';
 import {
-  Customer,
-  Transaction,
-  InterestType,
-  CompoundingFrequency,
-  TransactionType,
-} from '../generated/prisma/client';
+  replayTransactions,
+  getBalanceStatus,
+  computeEntryInterest,
+  TransactionEvent,
+  ReplayState,
+  RateChange,
+} from '../utils/dueAdvanceEngine';
 
-export interface EntryPaymentAllocation {
-  creditId: string;
-  amount: number;
-  date: Date;
-  appliedToPrincipal: number;
-  appliedToInterest: number;
+// ============ Exported Types ============
+
+export interface LedgerDueEntry {
+  transactionId: string | null;
+  date: string;
+  principalAmount: number;
+  accruedInterest: number;
+  totalDue: number;
+  isSystemGenerated: boolean;
 }
 
-export interface LedgerEntry {
-  entryId: string;
-  originalPrincipal: number;
-  remainingPrincipal: number;
-  interestType: InterestType;
-  interestRate: number;
-  compoundingFrequency: CompoundingFrequency | null;
-  customCompoundDays: number | null;
-  entryDate: Date;
-  interestStartDate: Date;
-  dueDate: Date | null;
-  accruedInterest: number;
-  interestPaid: number;
-  remainingInterest: number;
-  totalDue: number;
-  status: 'ACTIVE' | 'PARTIALLY_PAID' | 'SETTLED';
-  payments: EntryPaymentAllocation[];
-  remarks: string | null;
+export interface LedgerSettledEntry {
+  transactionId: string | null;
+  date: string;
+  principalAmount: number;
+  interestCharged: number;
+  settledAt: string;
+  settledByPaymentId: string;
 }
 
 export interface LedgerSummary {
-  totalMoneyLent: number;
-  totalMoneyReceived: number;
-  outstandingPrincipal: number;
+  status: 'Due' | 'Advance' | 'Settled';
+  displayAmount: number;
+  totalPrincipal: number;
   accruedInterest: number;
   totalDue: number;
-  unallocatedCredit?: number;
+  advance: number;
+  totalMoneyLent: number;
+  totalMoneyReceived: number;
 }
 
 export interface LedgerResult {
   customer: Customer;
   summary: LedgerSummary;
-  entries: LedgerEntry[];
+  openEntries: LedgerDueEntry[];
+  settledEntries: LedgerSettledEntry[];
   transactions: Transaction[];
 }
 
 export class LedgerService {
-  private interestService = new InterestService();
-
   /**
-   * Generates the per-entry interest ledger for a specific customer.
+   * Generates the customer ledger by replaying all user-created transactions
+   * through the Due/Advance engine. Read-only — does not modify any DB records.
    */
   public async generateLedger(
     userId: string,
@@ -66,414 +62,273 @@ export class LedgerService {
   ): Promise<LedgerResult> {
     // 1. Fetch customer and verify existence & ownership
     const customer = await prisma.customer.findFirst({
-      where: {
-        id: customerId,
-        userId,
-        isActive: true,
-      },
+      where: { id: customerId, userId, isActive: true },
     });
 
     if (!customer) {
       throw new AppError('Customer not found.', 404);
     }
 
-    // 2. Fetch all non-voided transactions for this customer
-    const dbTransactions = await prisma.transaction.findMany({
-      where: {
-        customerId,
-        isVoided: false,
-      },
+    // 2. Fetch all non-voided, non-system-generated transactions (source of truth)
+    const userTransactions = await prisma.transaction.findMany({
+      where: { customerId, isVoided: false, isSystemGenerated: false },
       orderBy: [{ date: 'asc' }, { createdAt: 'asc' }],
     });
 
-    const getEffectiveDate = (tx: Transaction) => tx.interestStartDate || tx.date;
+    // 3. Convert to engine events
+    const events: TransactionEvent[] = userTransactions.map((tx) => ({
+      id: tx.id,
+      type: tx.type as 'DEBIT' | 'CREDIT',
+      date: new Date(tx.date),
+      amount: new Decimal(tx.amount.toString()),
+      createdAt: new Date(tx.createdAt),
+    }));
 
-    // 3. Prepare timeline events sorted chronologically
-    type TimelineEvent =
-      | {
-          kind: 'DEBIT';
-          date: Date;
-          createdAt: Date;
-          id: string;
-          tx: Transaction;
-        }
-      | {
-          kind: 'CREDIT';
-          date: Date;
-          createdAt: Date;
-          id: string;
-          tx: Transaction;
-        };
+    // 4. Build customer rate schedule
+    const rateSchedule = await this.getCustomerRateSchedule(customerId);
 
-    const events: TimelineEvent[] = [];
+    // 5. Replay through the pure engine
+    const state = replayTransactions(events, rateSchedule);
 
-    for (const tx of dbTransactions) {
-      if (tx.type === TransactionType.DEBIT) {
-        events.push({
-          kind: 'DEBIT',
-          date: new Date(getEffectiveDate(tx)),
-          createdAt: new Date(tx.createdAt),
-          id: tx.id,
-          tx,
-        });
-      } else {
-        events.push({
-          kind: 'CREDIT',
-          date: new Date(tx.date),
-          createdAt: new Date(tx.createdAt),
-          id: tx.id,
-          tx,
-        });
-      }
-    }
+    // 6. Compute display status as of calculationDate
+    const balanceStatus = getBalanceStatus(
+      state.advance,
+      state.openDueEntries,
+      calculationDate,
+      rateSchedule,
+    );
 
-    // Stable chronological sort
-    events.sort((a, b) => {
-      const timeDiff = a.date.getTime() - b.date.getTime();
-      if (timeDiff !== 0) return timeDiff;
-      const createdDiff = a.createdAt.getTime() - b.createdAt.getTime();
-      if (createdDiff !== 0) return createdDiff;
-      return a.id.localeCompare(b.id);
-    });
-
-    // 4. Initialize internal entry representation
-    interface InternalEntry extends LedgerEntry {
-      lastInterestDate: Date;
-    }
-
-    const allEntries: InternalEntry[] = [];
-    const availableCreditSources: Array<{ creditId: string; date: Date; remaining: number }> = [];
-    let totalMoneyLent = 0;
-    let totalMoneyReceived = 0;
-
-    // 5. Walk through chronological events
-    for (const event of events) {
-      if (event.kind === 'DEBIT') {
-        const tx = event.tx;
-        const amount = Number(tx.amount);
-        totalMoneyLent += amount;
-        const interestStartDate = new Date(getEffectiveDate(tx));
-
-        // Resolve interest configuration: Transaction override -> Customer default -> System fallback
-        const resolvedInterestType: InterestType =
-          tx.interestType || customer.defaultInterestType || 'SIMPLE';
-
-        const resolvedInterestRate: number =
-          tx.interestRate !== null && tx.interestRate !== undefined
-            ? Number(tx.interestRate)
-            : Number(customer.lendingRate);
-
-        const resolvedFrequency: CompoundingFrequency | null =
-          resolvedInterestType === 'COMPOUND'
-            ? tx.compoundingFrequency || customer.compoundingFrequency || 'MONTHLY'
-            : null;
-
-        const resolvedCustomDays: number | null =
-          resolvedFrequency === 'CUSTOM'
-            ? tx.customCompoundDays || customer.customCompoundDays || null
-            : null;
-
-        const newEntry: InternalEntry = {
-          entryId: tx.id,
-          originalPrincipal: amount,
-          remainingPrincipal: amount,
-          interestType: resolvedInterestType,
-          interestRate: resolvedInterestRate,
-          compoundingFrequency: resolvedFrequency,
-          customCompoundDays: resolvedCustomDays,
-          entryDate: new Date(tx.date),
-          interestStartDate,
-          dueDate: tx.dueDate ? new Date(tx.dueDate) : null,
-          accruedInterest: 0,
-          interestPaid: 0,
-          remainingInterest: 0,
-          totalDue: amount,
-          status: 'ACTIVE',
-          payments: [],
-          remarks: tx.remarks,
-          lastInterestDate: interestStartDate,
-        };
-
-        // If prior unallocated credit exists, apply it immediately to this new DEBIT principal
-        for (const creditSource of availableCreditSources) {
-          if (creditSource.remaining <= 0) continue;
-          if (newEntry.remainingPrincipal <= 0) break;
-
-          const principalToPay = Math.min(creditSource.remaining, newEntry.remainingPrincipal);
-          newEntry.remainingPrincipal -= principalToPay;
-          creditSource.remaining -= principalToPay;
-
-          newEntry.payments.push({
-            creditId: creditSource.creditId,
-            amount: this.roundTo2(principalToPay),
-            date: creditSource.date,
-            appliedToPrincipal: this.roundTo2(principalToPay),
-            appliedToInterest: 0,
-          });
-
-          if (newEntry.remainingPrincipal <= 0) {
-            newEntry.status = 'SETTLED';
-          } else {
-            newEntry.status = 'PARTIALLY_PAID';
-          }
-        }
-
-        allEntries.push(newEntry);
-      } else {
-        // CREDIT payment event
-        const tx = event.tx;
-        const amount = Number(tx.amount);
-        totalMoneyReceived += amount;
-        let remainingCredit = amount;
-        const paymentDate = new Date(tx.date);
-
-        const paymentAllocationMap = new Map<
-          string,
-          { appliedToPrincipal: number; appliedToInterest: number }
-        >();
-
-        if (tx.targetEntryId) {
-          // TARGETED PAYMENT ALLOCATION
-          const targetEntry = allEntries.find((e) => e.entryId === tx.targetEntryId);
-          if (targetEntry) {
-            // Accrue interest on targetEntry up to paymentDate
-            if (
-              paymentDate.getTime() > targetEntry.lastInterestDate.getTime() &&
-              targetEntry.remainingPrincipal > 0
-            ) {
-              const calcResult = this.interestService.calculate({
-                principal: targetEntry.remainingPrincipal,
-                annualInterestRate: targetEntry.interestRate,
-                startDate: targetEntry.lastInterestDate,
-                calculationDate: paymentDate,
-                interestType: targetEntry.interestType,
-                compoundingFrequency: targetEntry.compoundingFrequency || undefined,
-                customCompoundDays: targetEntry.customCompoundDays,
-              });
-
-              targetEntry.accruedInterest += calcResult.interest;
-              targetEntry.lastInterestDate = paymentDate;
-            }
-
-            let appliedToPrincipal = 0;
-            let appliedToInterest = 0;
-
-            // Pass 1: Apply to targetEntry principal
-            if (remainingCredit > 0 && targetEntry.remainingPrincipal > 0) {
-              const principalToPay = Math.min(remainingCredit, targetEntry.remainingPrincipal);
-              targetEntry.remainingPrincipal -= principalToPay;
-              remainingCredit -= principalToPay;
-              appliedToPrincipal = principalToPay;
-            }
-
-            // Pass 2: Apply to targetEntry unpaid accrued interest
-            if (remainingCredit > 0) {
-              const currentUnpaidInterest = Math.max(
-                0,
-                targetEntry.accruedInterest - targetEntry.interestPaid,
-              );
-              if (currentUnpaidInterest > 0) {
-                const interestToPay = Math.min(remainingCredit, currentUnpaidInterest);
-                targetEntry.interestPaid += interestToPay;
-                remainingCredit -= interestToPay;
-                appliedToInterest = interestToPay;
-              }
-            }
-
-            if (appliedToPrincipal > 0 || appliedToInterest > 0) {
-              paymentAllocationMap.set(targetEntry.entryId, {
-                appliedToPrincipal,
-                appliedToInterest,
-              });
-            }
-          }
-        } else {
-          // Pass 1: Accrue interest up to paymentDate and apply payment to Principal across existing DEBIT entries in FIFO order
-          for (const entry of allEntries) {
-            // Accrue interest up to payment date on existing active entries
-            if (
-              paymentDate.getTime() > entry.lastInterestDate.getTime() &&
-              entry.remainingPrincipal > 0
-            ) {
-              const calcResult = this.interestService.calculate({
-                principal: entry.remainingPrincipal,
-                annualInterestRate: entry.interestRate,
-                startDate: entry.lastInterestDate,
-                calculationDate: paymentDate,
-                interestType: entry.interestType,
-                compoundingFrequency: entry.compoundingFrequency || undefined,
-                customCompoundDays: entry.customCompoundDays,
-              });
-
-              entry.accruedInterest += calcResult.interest;
-              entry.lastInterestDate = paymentDate;
-            }
-
-            if (remainingCredit > 0 && entry.remainingPrincipal > 0) {
-              const principalToPay = Math.min(remainingCredit, entry.remainingPrincipal);
-              entry.remainingPrincipal -= principalToPay;
-              remainingCredit -= principalToPay;
-
-              paymentAllocationMap.set(entry.entryId, {
-                appliedToPrincipal: principalToPay,
-                appliedToInterest: 0,
-              });
-            }
-          }
-
-          // Pass 2: If payment remains after principal across all existing entries is cleared, apply to unpaid accrued interest
-          if (remainingCredit > 0) {
-            for (const entry of allEntries) {
-              if (remainingCredit <= 0) break;
-
-              const currentUnpaidInterest = Math.max(0, entry.accruedInterest - entry.interestPaid);
-              if (currentUnpaidInterest > 0) {
-                const interestToPay = Math.min(remainingCredit, currentUnpaidInterest);
-                entry.interestPaid += interestToPay;
-                remainingCredit -= interestToPay;
-
-                const existing = paymentAllocationMap.get(entry.entryId) || {
-                  appliedToPrincipal: 0,
-                  appliedToInterest: 0,
-                };
-                existing.appliedToInterest += interestToPay;
-                paymentAllocationMap.set(entry.entryId, existing);
-              }
-            }
-          }
-        }
-
-        // Record payments on entries
-        for (const [entryId, alloc] of paymentAllocationMap.entries()) {
-          const entry = allEntries.find((e) => e.entryId === entryId);
-          if (entry && (alloc.appliedToPrincipal > 0 || alloc.appliedToInterest > 0)) {
-            entry.payments.push({
-              creditId: tx.id,
-              amount: this.roundTo2(alloc.appliedToPrincipal + alloc.appliedToInterest),
-              date: tx.date,
-              appliedToPrincipal: this.roundTo2(alloc.appliedToPrincipal),
-              appliedToInterest: this.roundTo2(alloc.appliedToInterest),
-            });
-          }
-        }
-
-        // Update statuses of all entries
-        for (const entry of allEntries) {
-          const unpaidInterest = Math.max(0, entry.accruedInterest - entry.interestPaid);
-          if (entry.remainingPrincipal <= 0 && unpaidInterest <= 0) {
-            entry.status = 'SETTLED';
-          } else if (
-            entry.remainingPrincipal < entry.originalPrincipal ||
-            entry.interestPaid > 0
-          ) {
-            entry.status = 'PARTIALLY_PAID';
-          } else {
-            entry.status = 'ACTIVE';
-          }
-        }
-
-        // If payment still remains after clearing all existing entries' principal and interest, buffer as available unallocated credit
-        if (remainingCredit > 0) {
-          availableCreditSources.push({
-            creditId: tx.id,
-            date: paymentDate,
-            remaining: remainingCredit,
-          });
-        }
-      }
-    }
-
-    // 6. Accrue remaining interest on all active entries up to calculationDate
-    let totalOutstandingPrincipal = 0;
-    let totalAccruedInterest = 0;
-
-    const finalEntries: LedgerEntry[] = allEntries.map((entry) => {
-      if (
-        calculationDate.getTime() > entry.lastInterestDate.getTime() &&
-        entry.remainingPrincipal > 0
-      ) {
-        const calcResult = this.interestService.calculate({
-          principal: entry.remainingPrincipal,
-          annualInterestRate: entry.interestRate,
-          startDate: entry.lastInterestDate,
-          calculationDate,
-          interestType: entry.interestType,
-          compoundingFrequency: entry.compoundingFrequency || undefined,
-          customCompoundDays: entry.customCompoundDays,
-        });
-
-        entry.accruedInterest += calcResult.interest;
-        entry.lastInterestDate = calculationDate;
-      }
-
-      const accruedRounded = this.roundTo2(entry.accruedInterest);
-      const paidRounded = this.roundTo2(entry.interestPaid);
-      const remainingPrincipalRounded = this.roundTo2(Math.max(0, entry.remainingPrincipal));
-      const remainingInterestRounded = this.roundTo2(Math.max(0, accruedRounded - paidRounded));
-      const totalDueRounded = this.roundTo2(
-        remainingPrincipalRounded + remainingInterestRounded,
+    // 7. Format open entries with accrued interest for display
+    const openEntries: LedgerDueEntry[] = state.openDueEntries.map((entry) => {
+      const { interest } = computeEntryInterest(
+        entry.principalAmount,
+        entry.date,
+        calculationDate,
+        rateSchedule,
       );
-
-      let status: 'ACTIVE' | 'PARTIALLY_PAID' | 'SETTLED' = 'ACTIVE';
-      if (remainingPrincipalRounded === 0 && remainingInterestRounded === 0) {
-        status = 'SETTLED';
-      } else if (
-        remainingPrincipalRounded < entry.originalPrincipal ||
-        paidRounded > 0
-      ) {
-        status = 'PARTIALLY_PAID';
-      }
-
-      totalOutstandingPrincipal += remainingPrincipalRounded;
-      totalAccruedInterest += remainingInterestRounded;
-
+      const principal = this.decToNum(entry.principalAmount);
+      const accruedInterest = this.decToNum(interest);
       return {
-        entryId: entry.entryId,
-        originalPrincipal: entry.originalPrincipal,
-        remainingPrincipal: remainingPrincipalRounded,
-        interestType: entry.interestType,
-        interestRate: entry.interestRate,
-        compoundingFrequency: entry.compoundingFrequency,
-        customCompoundDays: entry.customCompoundDays,
-        entryDate: entry.entryDate,
-        interestStartDate: entry.interestStartDate,
-        dueDate: entry.dueDate,
-        accruedInterest: accruedRounded,
-        interestPaid: paidRounded,
-        remainingInterest: remainingInterestRounded,
-        totalDue: totalDueRounded,
-        status,
-        payments: entry.payments,
-        remarks: entry.remarks,
+        transactionId: entry.originTransactionId,
+        date: entry.date.toISOString(),
+        principalAmount: principal,
+        accruedInterest,
+        totalDue: this.roundTo2(principal + accruedInterest),
+        isSystemGenerated: entry.originTransactionId === null,
       };
     });
 
-    const totalUnallocatedCredit = availableCreditSources.reduce(
-      (sum, src) => sum + src.remaining,
-      0,
-    );
+    // 7. Format settled entries for audit trail
+    const settledEntries: LedgerSettledEntry[] = state.settledHistory.map((record) => ({
+      transactionId: record.entryOriginTransactionId,
+      date: record.entryDate.toISOString(),
+      principalAmount: this.decToNum(record.entryPrincipal),
+      interestCharged: this.decToNum(record.interestCharged),
+      settledAt: record.settledAt.toISOString(),
+      settledByPaymentId: record.settledByPaymentId,
+    }));
+
+    // 8. Compute money flow totals
+    let totalMoneyLent = 0;
+    let totalMoneyReceived = 0;
+    for (const tx of userTransactions) {
+      const amount = Number(tx.amount);
+      if (tx.type === TransactionType.DEBIT) totalMoneyLent += amount;
+      else totalMoneyReceived += amount;
+    }
 
     const summary: LedgerSummary = {
+      status: balanceStatus.status,
+      displayAmount: this.decToNum(balanceStatus.displayAmount),
+      totalPrincipal: this.decToNum(balanceStatus.totalPrincipal),
+      accruedInterest: this.decToNum(balanceStatus.totalInterest),
+      totalDue: balanceStatus.status === 'Due' ? this.decToNum(balanceStatus.displayAmount) : 0,
+      advance: this.decToNum(state.advance),
       totalMoneyLent: this.roundTo2(totalMoneyLent),
       totalMoneyReceived: this.roundTo2(totalMoneyReceived),
-      outstandingPrincipal: this.roundTo2(totalOutstandingPrincipal),
-      accruedInterest: this.roundTo2(totalAccruedInterest),
-      totalDue: this.roundTo2(totalOutstandingPrincipal + totalAccruedInterest),
     };
 
-    if (totalUnallocatedCredit > 0) {
-      summary.unallocatedCredit = this.roundTo2(totalUnallocatedCredit);
-    }
+    // Fetch all transactions (including system-generated) for the full list
+    const allTransactions = await prisma.transaction.findMany({
+      where: { customerId, isVoided: false },
+      orderBy: [{ date: 'asc' }, { createdAt: 'asc' }],
+    });
 
     return {
       customer,
       summary,
-      entries: finalEntries,
-      transactions: dbTransactions,
+      openEntries,
+      settledEntries,
+      transactions: allTransactions,
     };
+  }
+
+  /**
+   * Full reconciliation: replays all user transactions and persists the computed
+   * state as a materialized cache. Called after every createTransaction and
+   * voidTransaction to keep cached fields consistent with the source of truth.
+   *
+   * @param customerId - The customer to reconcile
+   * @param txClient - Optional Prisma transaction client for atomicity
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  public async reconcileCustomerLedger(customerId: string, txClient?: any): Promise<void> {
+    const db = txClient || prisma;
+
+    // 1. Delete all system-generated entries (they'll be recreated if needed)
+    await db.transaction.deleteMany({
+      where: { customerId, isSystemGenerated: true },
+    });
+
+    // 2. Clear all cached settlement fields on remaining transactions
+    await db.transaction.updateMany({
+      where: { customerId, isVoided: false },
+      data: {
+        isSettled: false,
+        settledAt: null,
+        settledByPaymentId: null,
+        interestCharged: null,
+        outstandingPrincipal: null,
+      },
+    });
+
+    // 3. Fetch customer
+    const customer = await db.customer.findUnique({
+      where: { id: customerId },
+    });
+    if (!customer) return;
+
+    // 4. Fetch all remaining non-voided transactions (user-created only now)
+    const dbTransactions = await db.transaction.findMany({
+      where: { customerId, isVoided: false },
+      orderBy: [{ date: 'asc' }, { createdAt: 'asc' }],
+    });
+
+    // 5. Convert to engine events
+    const events: TransactionEvent[] = dbTransactions.map((tx: Transaction) => ({
+      id: tx.id,
+      type: tx.type as 'DEBIT' | 'CREDIT',
+      date: new Date(tx.date),
+      amount: new Decimal(tx.amount.toString()),
+      createdAt: new Date(tx.createdAt),
+    }));
+
+    // 6. Replay through the pure engine with historical rate schedule
+    const rateSchedule = await this.getCustomerRateSchedule(customerId);
+    const state: ReplayState = replayTransactions(events, rateSchedule);
+
+    // 7. Update cached fields on settled transactions
+    for (const record of state.settledHistory) {
+      if (record.entryOriginTransactionId) {
+        await db.transaction.update({
+          where: { id: record.entryOriginTransactionId },
+          data: {
+            isSettled: true,
+            settledAt: record.settledAt,
+            settledByPaymentId: record.settledByPaymentId,
+            interestCharged: record.interestCharged.toDecimalPlaces(2).toNumber(),
+          },
+        });
+      }
+    }
+
+    // 8. Update outstandingPrincipal for all DEBIT transactions with advance usage
+    for (const [txId, usage] of state.advanceUsageByTransaction) {
+      await db.transaction.update({
+        where: { id: txId },
+        data: {
+          outstandingPrincipal: usage.outstandingPrincipal.toDecimalPlaces(2).toNumber(),
+        },
+      });
+    }
+
+    // 9. Create system-generated entries for open consolidated due entries
+    for (const entry of state.openDueEntries) {
+      if (entry.originTransactionId === null && entry.originPaymentId) {
+        await db.transaction.create({
+          data: {
+            customerId,
+            type: TransactionType.DEBIT,
+            amount: entry.principalAmount.toDecimalPlaces(2).toNumber(),
+            date: entry.date,
+            interestStartDate: entry.date,
+            outstandingPrincipal: entry.principalAmount.toDecimalPlaces(2).toNumber(),
+            isSystemGenerated: true,
+            createdByPaymentId: entry.originPaymentId,
+            isVoided: false,
+            isSettled: false,
+          },
+        });
+      }
+    }
+
+    // 10. Update customer's advance balance
+    await db.customer.update({
+      where: { id: customerId },
+      data: {
+        advanceBalance: state.advance.toDecimalPlaces(2).toNumber(),
+      },
+    });
+  }
+
+  /** Convert Decimal to number, rounded to 2 decimal places */
+  private decToNum(val: Decimal): number {
+    return Math.round((val.toNumber() + Number.EPSILON) * 100) / 100;
   }
 
   private roundTo2(val: number): number {
     return Math.round((val + Number.EPSILON) * 100) / 100;
+  }
+
+  /**
+   * Fetches the historical rate schedule for a customer.
+   * Uses customer_interest_rates records ordered by effectiveDate asc.
+   * If customer.interestRate differs from the latest record, incorporates it
+   * effective from customer.updatedAt.
+   * Falls back to customer.createdAt with customer.interestRate.
+   */
+  public async getCustomerRateSchedule(customerId: string): Promise<RateChange[]> {
+    const customer = await prisma.customer.findUnique({
+      where: { id: customerId },
+    });
+    if (!customer) return [];
+
+    const history = await prisma.customerInterestRate.findMany({
+      where: { customerId },
+      orderBy: { effectiveDate: 'asc' },
+    });
+
+    const schedule: RateChange[] = [];
+
+    if (history.length > 0) {
+      if (new Date(history[0].effectiveDate).getTime() > 0) {
+        schedule.push({
+          effectiveDate: new Date(0),
+          monthlyRatePercent: new Decimal(0),
+        });
+      }
+      for (const h of history) {
+        schedule.push({
+          effectiveDate: new Date(h.effectiveDate),
+          monthlyRatePercent: new Decimal(h.interestRate.toString()),
+        });
+      }
+    } else {
+      schedule.push({
+        effectiveDate: new Date(0),
+        monthlyRatePercent: new Decimal(customer.interestRate.toString()),
+      });
+    }
+
+    const currentRate = new Decimal(customer.interestRate.toString());
+    const lastRate = schedule[schedule.length - 1].monthlyRatePercent;
+    if (!lastRate.equals(currentRate)) {
+      schedule.push({
+        effectiveDate: new Date(customer.updatedAt),
+        monthlyRatePercent: currentRate,
+      });
+    }
+
+    return schedule;
   }
 }

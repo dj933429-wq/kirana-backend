@@ -177,9 +177,7 @@ export const listTransactionsSchema = z
       .min(1, 'Limit must be at least 1')
       .max(100, 'Limit cannot exceed 100')
       .default(20),
-    sort: z
-      .enum(['date', 'amount', 'interestStartDate', 'dueDate', 'createdAt'])
-      .default('date'),
+    sort: z.enum(['date', 'amount', 'interestStartDate', 'dueDate', 'createdAt']).default('date'),
     order: z.enum(['asc', 'desc']).default('desc'),
     type: z.enum(['DEBIT', 'CREDIT']).optional(),
     isVoided: z.enum(['true', 'false', 'all']).default('false'),

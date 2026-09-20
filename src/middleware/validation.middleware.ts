@@ -37,6 +37,11 @@ export const createCustomerSchema = z
       .int('Custom compound days must be an integer')
       .positive('Custom compound days must be greater than zero')
       .optional(),
+    interestRate: z.coerce
+      .number()
+      .min(0, 'Interest rate cannot be negative')
+      .max(100, 'Interest rate cannot exceed 100%')
+      .default(0),
   })
   .refine(
     (data) => {
@@ -84,6 +89,12 @@ export const updateCustomerSchema = z
       .int('Custom compound days must be an integer')
       .positive('Custom compound days must be greater than zero')
       .optional(),
+    interestRate: z.coerce
+      .number()
+      .min(0, 'Interest rate cannot be negative')
+      .max(100, 'Interest rate cannot exceed 100%')
+      .optional(),
+    effectiveDate: z.coerce.date().optional(),
   })
   .refine((data) => Object.keys(data).length > 0, {
     message: 'At least one field must be provided for update',

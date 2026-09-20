@@ -26,19 +26,33 @@ const configSchema = z
     PORT: z.coerce.number().int().positive().default(3000),
     DATABASE_URL: z.string().url('DATABASE_URL must be a valid PostgreSQL connection URL'),
     DATABASE_POOL_SIZE: z.coerce.number().int().min(1).max(100).default(5),
-    DATABASE_SSL: z.preprocess(
-      (val) => (typeof val === 'string' ? val.toLowerCase() === 'true' || val === '1' : Boolean(val)),
-      z.boolean(),
-    ).default(false),
-    DATABASE_SSL_REJECT_UNAUTHORIZED: z.preprocess(
-      (val) => (typeof val === 'string' ? val.toLowerCase() === 'true' || val === '1' : val === undefined ? true : Boolean(val)),
-      z.boolean(),
-    ).default(true),
+    DATABASE_SSL: z
+      .preprocess(
+        (val) =>
+          typeof val === 'string' ? val.toLowerCase() === 'true' || val === '1' : Boolean(val),
+        z.boolean(),
+      )
+      .default(false),
+    DATABASE_SSL_REJECT_UNAUTHORIZED: z
+      .preprocess(
+        (val) =>
+          typeof val === 'string'
+            ? val.toLowerCase() === 'true' || val === '1'
+            : val === undefined
+              ? true
+              : Boolean(val),
+        z.boolean(),
+      )
+      .default(true),
     JWT_SECRET: z.string().min(8, 'JWT_SECRET must be at least 8 characters long'),
     JWT_EXPIRES_IN: z.string().default('1d'),
     NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
     CORS_ALLOWED_ORIGINS: z.string().default('*'),
-    RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(15 * 60 * 1000), // 15 minutes
+    RATE_LIMIT_WINDOW_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(15 * 60 * 1000), // 15 minutes
     RATE_LIMIT_MAX_LOGIN_ATTEMPTS: z.coerce.number().int().positive().default(10),
   })
   .refine(
@@ -96,7 +110,10 @@ const parsed = configSchema.safeParse(process.env);
 
 if (!parsed.success) {
   // eslint-disable-next-line no-console
-  console.error('Invalid environment configuration:\n', JSON.stringify(parsed.error.format(), null, 2));
+  console.error(
+    'Invalid environment configuration:\n',
+    JSON.stringify(parsed.error.format(), null, 2),
+  );
   process.exit(1);
 }
 
