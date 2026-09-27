@@ -100,11 +100,13 @@ export class LedgerService {
 
     // 7. Format open entries with accrued interest for display
     const openEntries: LedgerDueEntry[] = state.openDueEntries.map((entry) => {
+      const priorUnpaid = entry.unpaidInterest ?? new Decimal(0);
       const { interest } = computeEntryInterest(
         entry.principalAmount,
         entry.date,
         calculationDate,
         rateSchedule,
+        priorUnpaid,
       );
       const principal = this.decToNum(entry.principalAmount);
       const accruedInterest = this.decToNum(interest);
