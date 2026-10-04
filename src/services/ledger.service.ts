@@ -6,6 +6,8 @@ import {
   replayTransactions,
   getBalanceStatus,
   computeEntryInterest,
+  normalizeRateSchedule,
+  getEffectiveRateAt,
   TransactionEvent,
   ReplayState,
   RateChange,
@@ -31,6 +33,21 @@ export interface LedgerSettledEntry {
   settledByPaymentId: string;
 }
 
+export interface LedgerBreakdownItem {
+  transactionId: string | null;
+  startDate: string;
+  endDate: string;
+  principalAmount: number;
+  rateApplied: string;
+  ratePercent: number;
+  monthsElapsed: number;
+  interestCharged: number;
+  isSettled: boolean;
+  isAdvance: boolean;
+  settledByPaymentId: string | null;
+  description?: string;
+}
+
 export interface LedgerSummary {
   status: 'Due' | 'Advance' | 'Settled';
   displayAmount: number;
@@ -47,6 +64,7 @@ export interface LedgerResult {
   summary: LedgerSummary;
   openEntries: LedgerDueEntry[];
   settledEntries: LedgerSettledEntry[];
+  breakdownLog: LedgerBreakdownItem[];
   transactions: Transaction[];
 }
 
@@ -120,7 +138,7 @@ export class LedgerService {
       };
     });
 
-    // 7. Format settled entries for audit trail
+    // 8. Format settled entries for audit trail
     const settledEntries: LedgerSettledEntry[] = state.settledHistory.map((record) => ({
       transactionId: record.entryOriginTransactionId,
       date: record.entryDate.toISOString(),
@@ -130,7 +148,86 @@ export class LedgerService {
       settledByPaymentId: record.settledByPaymentId,
     }));
 
-    // 8. Compute money flow totals
+    // 9. Build authoritative breakdown log from settledHistory, openDueEntries, and advance
+    const normalizedSched = normalizeRateSchedule(rateSchedule);
+    const breakdownLog: LedgerBreakdownItem[] = [];
+
+    // Settled entries breakdown
+    for (const record of state.settledHistory) {
+      const effRate = getEffectiveRateAt(normalizedSched, record.entryDate);
+      const rateNum = this.decToNum(effRate);
+      breakdownLog.push({
+        transactionId: record.entryOriginTransactionId,
+        startDate: record.entryDate.toISOString(),
+        endDate: record.settledAt.toISOString(),
+        principalAmount: this.decToNum(record.entryPrincipal),
+        rateApplied: `${rateNum}%`,
+        ratePercent: rateNum,
+        monthsElapsed: this.decToNum(record.monthsElapsed),
+        interestCharged: this.decToNum(record.interestCharged),
+        isSettled: true,
+        isAdvance: false,
+        settledByPaymentId: record.settledByPaymentId,
+        description: `Settled entry against payment ${record.settledByPaymentId}`,
+      });
+    }
+
+    // Open due entries breakdown as of calculationDate
+    for (const entry of state.openDueEntries) {
+      const priorUnpaid = entry.unpaidInterest ?? new Decimal(0);
+      const { interest, monthsElapsed } = computeEntryInterest(
+        entry.principalAmount,
+        entry.date,
+        calculationDate,
+        rateSchedule,
+        priorUnpaid,
+      );
+      const effRate = getEffectiveRateAt(normalizedSched, entry.date);
+      const rateNum = this.decToNum(effRate);
+      breakdownLog.push({
+        transactionId: entry.originTransactionId,
+        startDate: entry.date.toISOString(),
+        endDate: calculationDate.toISOString(),
+        principalAmount: this.decToNum(entry.principalAmount),
+        rateApplied: `${rateNum}%`,
+        ratePercent: rateNum,
+        monthsElapsed: this.decToNum(monthsElapsed),
+        interestCharged: this.decToNum(interest),
+        isSettled: false,
+        isAdvance: false,
+        settledByPaymentId: null,
+        description:
+          entry.originTransactionId === null ? 'Consolidated unpaid balance' : 'Open due entry',
+      });
+    }
+
+    // Advance balance breakdown item (if advance > 0)
+    if (state.advance.gt(0)) {
+      const lastTx =
+        userTransactions.length > 0 ? userTransactions[userTransactions.length - 1] : null;
+      const advStartDate = lastTx
+        ? new Date(lastTx.date).toISOString()
+        : calculationDate.toISOString();
+      breakdownLog.push({
+        transactionId: null,
+        startDate: advStartDate,
+        endDate: calculationDate.toISOString(),
+        principalAmount: this.decToNum(state.advance),
+        rateApplied: '0%',
+        ratePercent: 0,
+        monthsElapsed: 0,
+        interestCharged: 0,
+        isSettled: false,
+        isAdvance: true,
+        settledByPaymentId: null,
+        description: 'Advance balance (0% interest)',
+      });
+    }
+
+    // Sort breakdown log chronologically by startDate
+    breakdownLog.sort((a, b) => new Date(a.startDate).getTime() - new Date(b.startDate).getTime());
+
+    // 10. Compute money flow totals
     let totalMoneyLent = 0;
     let totalMoneyReceived = 0;
     for (const tx of userTransactions) {
@@ -161,6 +258,7 @@ export class LedgerService {
       summary,
       openEntries,
       settledEntries,
+      breakdownLog,
       transactions: allTransactions,
     };
   }
